@@ -1,0 +1,93 @@
+name: Comment on Test Failure
+
+on:
+  workflow_run: # zizmor: ignore[dangerous-triggers] -- This workflow only comments on PRs and never checks out or executes PR code
+    workflows:
+      - Test
+    types:
+      - completed
+
+permissions: {}
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+    timeout-minutes: 5
+    steps:
+      - name: Comment on failed tests
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const marker = '<!-- fastapi-codex-test-failure -->';
+            const workflowRun = context.payload.workflow_run;
+            const conclusion = workflowRun.conclusion;
+
+            let pullRequests = workflowRun.pull_requests;
+            if (pullRequests.length === 0) {
+              const associatedPulls = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                commit_sha: workflowRun.head_sha,
+              });
+              pullRequests = associatedPulls.data;
+            }
+
+            if (pullRequests.length === 0) {
+              core.info(`No pull request found for ${workflowRun.head_sha}.`);
+              return;
+            }
+
+            const failed = !['success', 'skipped'].includes(conclusion);
+
+            for (const pr of pullRequests) {
+              const issue_number = pr.number;
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                per_page: 100,
+              });
+              const existingComment = comments.find((comment) =>
+                comment.user.type === 'Bot' && comment.body.includes(marker)
+              );
+
+              if (!failed) {
+                if (existingComment) {
+                  await github.rest.issues.deleteComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    comment_id: existingComment.id,
+                  });
+                }
+                continue;
+              }
+
+              const body = `${marker}
+            The **Test** workflow failed for commit \`${workflowRun.head_sha}\`.
+
+            Conclusion: \`${conclusion}\`
+
+            View the failed run: ${workflowRun.html_url}`;
+
+              if (existingComment) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existingComment.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number,
+                  body,
+                });
+              }
+            }
